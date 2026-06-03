@@ -20,6 +20,53 @@ import { formatUtcSqlDateTime } from './localTimeService.js';
 import { withAccountProxyOverride } from './siteProxy.js';
 
 type CheckinExecutionStatus = 'success' | 'failed' | 'skipped';
+export type CheckinBatchStaggerMode = 'scheduled-cron';
+
+const CRON_STAGGER_SITE_DELAY_MAX_MS = 8 * 60 * 1000;
+const CRON_STAGGER_ACCOUNT_GAP_MIN_MS = 20 * 1000;
+const CRON_STAGGER_ACCOUNT_GAP_MAX_MS = 75 * 1000;
+
+function randomIntegerBetween(minInclusive: number, maxInclusive: number, random: () => number = Math.random) {
+  const safeMin = Math.trunc(Math.min(minInclusive, maxInclusive));
+  const safeMax = Math.trunc(Math.max(minInclusive, maxInclusive));
+  return safeMin + Math.floor(random() * (safeMax - safeMin + 1));
+}
+
+function sleep(ms: number) {
+  return new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, Math.max(0, Math.trunc(ms)));
+    if (typeof (timer as any)?.unref === 'function') {
+      (timer as any).unref();
+    }
+  });
+}
+
+export function buildScheduledCronSiteStaggerPlan(
+  accountIds: number[],
+  random: () => number = Math.random,
+) {
+  let nextDelayMs = randomIntegerBetween(0, CRON_STAGGER_SITE_DELAY_MAX_MS, random);
+
+  return accountIds.map((accountId) => {
+    const currentDelayMs = nextDelayMs;
+    nextDelayMs += randomIntegerBetween(
+      CRON_STAGGER_ACCOUNT_GAP_MIN_MS,
+      CRON_STAGGER_ACCOUNT_GAP_MAX_MS,
+      random,
+    );
+    return {
+      accountId,
+      delayMs: currentDelayMs,
+    };
+  });
+}
+
+async function waitForPlannedDelay(startedAtMs: number, plannedDelayMs: number) {
+  const remainingMs = plannedDelayMs - (Date.now() - startedAtMs);
+  if (remainingMs > 0) {
+    await sleep(remainingMs);
+  }
+}
 
 function isSiteDisabled(status?: string | null): boolean {
   return (status || 'active') === 'disabled';
@@ -320,7 +367,11 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
   };
 }
 
-export async function checkinAll(options?: { accountIds?: number[]; scheduleMode?: 'cron' | 'interval' }) {
+export async function checkinAll(options?: {
+  accountIds?: number[];
+  scheduleMode?: 'cron' | 'interval';
+  staggerMode?: CheckinBatchStaggerMode;
+}) {
   const rows = await db
     .select()
     .from(schema.accounts)
@@ -335,6 +386,7 @@ export async function checkinAll(options?: { accountIds?: number[]; scheduleMode
 
   const scopedAccountIds = options?.accountIds ? new Set(options.accountIds) : null;
   const results: Array<{ accountId: number; username: string | null; site: string; result: any }> = [];
+  const useScheduledCronStagger = options?.staggerMode === 'scheduled-cron';
 
   const grouped = new Map<number, typeof rows>();
   for (const row of rows) {
@@ -345,7 +397,21 @@ export async function checkinAll(options?: { accountIds?: number[]; scheduleMode
   }
 
   const promises = Array.from(grouped.entries()).map(async ([_, siteRows]) => {
+    const staggerPlan = useScheduledCronStagger
+      ? buildScheduledCronSiteStaggerPlan(siteRows.map((row) => row.accounts.id))
+      : null;
+    const delayByAccountId = staggerPlan
+      ? new Map(staggerPlan.map((item) => [item.accountId, item.delayMs]))
+      : null;
+    const startedAtMs = delayByAccountId ? Date.now() : 0;
+
     for (const row of siteRows) {
+      if (delayByAccountId) {
+        await waitForPlannedDelay(
+          startedAtMs,
+          delayByAccountId.get(row.accounts.id) ?? 0,
+        );
+      }
       const r = await checkinAccount(row.accounts.id, {
         skipEvent: true,
         scheduleMode: options?.scheduleMode,

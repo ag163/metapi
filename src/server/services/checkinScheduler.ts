@@ -60,7 +60,10 @@ function createCheckinTask(cronExpr: string) {
   return cron.schedule(cronExpr, async () => {
     console.log(`[Scheduler] Running check-in at ${new Date().toISOString()}`);
     try {
-      const results = await checkinAll({ scheduleMode: 'cron' });
+      const results = await checkinAll({
+        scheduleMode: 'cron',
+        staggerMode: 'scheduled-cron',
+      });
       const success = results.filter((r) => r.result.success).length;
       const failed = results.length - success;
       console.log(`[Scheduler] Check-in complete: ${success} success, ${failed} failed`);

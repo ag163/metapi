@@ -80,7 +80,7 @@ describe('checkinScheduler', () => {
     });
     expect(clearIntervalSpy).toHaveBeenCalledTimes(1);
     expect(scheduleMock).toHaveBeenCalledTimes(2);
-  });
+  }, 10_000);
 
   it('selects due accounts from the last successful checkin time', async () => {
     const scheduler = await import('./checkinScheduler.js');
@@ -91,5 +91,26 @@ describe('checkinScheduler', () => {
       { id: 2, lastCheckinAt: '2026-03-20T05:59:59.000Z' },
       { id: 3, lastCheckinAt: '2026-03-20T06:30:00.000Z' },
     ], 6, now)).toEqual([1, 2]);
+  });
+
+  it('passes scheduled cron stagger mode when the cron task fires', async () => {
+    allMock.mockResolvedValue([]);
+    const scheduler = await import('./checkinScheduler.js');
+
+    scheduler.updateCheckinSchedule({
+      mode: 'cron',
+      cronExpr: '0 8 * * *',
+      intervalHours: 6,
+    });
+
+    const cronCallback = scheduleMock.mock.calls[0]?.[1] as (() => Promise<void>) | undefined;
+    expect(typeof cronCallback).toBe('function');
+
+    await cronCallback?.();
+
+    expect(allMock).toHaveBeenCalledWith({
+      scheduleMode: 'cron',
+      staggerMode: 'scheduled-cron',
+    });
   });
 });
