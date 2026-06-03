@@ -69,7 +69,7 @@
 
 1. 在「凭证模式」里选择 Session 模式，分别粘贴 F12 界面中的 `auth_token`、`refresh_token`、`token_expires_at` 字段进行验证，无需配置用户 ID
 2. 不要使用账号密码登录，Metapi 不支持代替 Sub2API 做登录
-3. Sub2API 通常为订阅制使用，不支持签到；如果你只关心代理调用，也可以直接改用 API Key 模式
+3. Sub2API 通常为订阅制使用。Metapi 会尝试调用 `/api/v1/user/checkin`；若站点未暴露该接口，则会按“不支持签到”处理。如果你只关心代理调用，也可以直接改用 API Key 模式
 4. 若 `GET /v1/models` 为空，先确认该账号下已有可用用户 API Key，Metapi 会再尝试用它发现模型
 
 详细操作说明见 [上游接入](/upstream-integration)。

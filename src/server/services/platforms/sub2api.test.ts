@@ -76,8 +76,53 @@ describe('Sub2ApiAdapter', () => {
     expect(await adapter.detect(baseUrl)).toBe(false);
   });
 
-  it('returns unsupported for checkin', async () => {
-    const result = await adapter.checkin('http://localhost', 'token');
+  it('checks in via /api/v1/user/checkin when the deployment exposes it', async () => {
+    let receivedAuth = '';
+    let receivedMethod = '';
+
+    await startServer((req, res) => {
+      if (req.url === '/api/v1/user/checkin') {
+        receivedAuth = String(req.headers.authorization || '');
+        receivedMethod = String(req.method || '');
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          code: 0,
+          message: 'success',
+          data: {
+            amount: 1,
+            consecutive_days: 1,
+            new_balance: 30.3849772,
+          },
+        }));
+        return;
+      }
+      res.writeHead(404).end();
+    });
+
+    const result = await adapter.checkin(baseUrl, 'jwt-token');
+    expect(receivedMethod).toBe('POST');
+    expect(receivedAuth).toBe('Bearer jwt-token');
+    expect(result).toEqual({
+      success: true,
+      message: 'success',
+      reward: '1',
+    });
+  });
+
+  it('falls back to unsupported when /api/v1/user/checkin is missing', async () => {
+    await startServer((req, res) => {
+      if (req.url === '/api/v1/user/checkin') {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          code: 404,
+          message: 'not found',
+        }));
+        return;
+      }
+      res.writeHead(404).end();
+    });
+
+    const result = await adapter.checkin(baseUrl, 'jwt-token');
     expect(result.success).toBe(false);
     expect(result.message).toContain('not supported');
   });

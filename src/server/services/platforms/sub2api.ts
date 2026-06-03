@@ -19,7 +19,8 @@ function normalizeBaseUrl(baseUrl: string): string {
  * Sub2API adapter.
  *
  * Sub2API uses JWT-based auth with endpoints under /api/v1/*.
- * It does NOT support: login or check-in.
+ * It does NOT support login. Some deployments expose check-in under
+ * /api/v1/user/checkin, while others do not.
  * Balance is derived from a USD amount returned by /api/v1/auth/me.
  */
 export class Sub2ApiAdapter extends BasePlatformAdapter {
@@ -58,6 +59,16 @@ export class Sub2ApiAdapter extends BasePlatformAdapter {
       }
     }
     return undefined;
+  }
+
+  private isUnsupportedCheckinErrorMessage(message?: string | null): boolean {
+    const normalized = (message || '').trim().toLowerCase();
+    if (!normalized) return false;
+    return (
+      normalized.includes('http 404') ||
+      normalized.includes('not found') ||
+      normalized.includes('invalid url')
+    );
   }
 
   private parseDateTime(raw: unknown): string | undefined {
@@ -702,12 +713,36 @@ export class Sub2ApiAdapter extends BasePlatformAdapter {
     }
   }
 
-  // --- Check-in: Not supported ---
+  // --- Check-in: supported by some Sub2API deployments ---
   async checkin(
-    _baseUrl: string,
-    _accessToken: string,
+    baseUrl: string,
+    accessToken: string,
   ): Promise<CheckinResult> {
-    return { success: false, message: 'Check-in is not supported by Sub2API' };
+    const normalizedBase = normalizeBaseUrl(baseUrl);
+    const endpoint = '/api/v1/user/checkin';
+
+    try {
+      const res = await this.fetchJson<any>(`${normalizedBase}${endpoint}`, {
+        method: 'POST',
+        headers: this.buildAuthHeader(accessToken),
+      });
+      const data = this.parseSub2ApiEnvelope<any>(res, endpoint);
+      const rewardAmount = this.parseNonNegativeNumber(data?.amount);
+
+      return {
+        success: true,
+        message: typeof res?.message === 'string' && res.message.trim()
+          ? res.message.trim()
+          : 'checkin success',
+        ...(rewardAmount !== undefined ? { reward: String(rewardAmount) } : {}),
+      };
+    } catch (error: any) {
+      const message = error?.message || 'checkin failed';
+      if (this.isUnsupportedCheckinErrorMessage(message)) {
+        return { success: false, message: 'Check-in is not supported by Sub2API' };
+      }
+      return { success: false, message };
+    }
   }
 
   // --- Balance ---
