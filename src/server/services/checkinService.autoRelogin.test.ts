@@ -9,6 +9,7 @@ const notifyMock = vi.fn();
 const reportTokenExpiredMock = vi.fn();
 const refreshBalanceMock = vi.fn();
 const decryptPasswordMock = vi.fn();
+const refreshSub2ApiManagedSessionMock = vi.fn();
 
 const selectAllMock = vi.fn();
 const insertValuesMock = vi.fn();
@@ -78,6 +79,10 @@ vi.mock('./accountCredentialService.js', () => ({
   decryptAccountPassword: (...args: unknown[]) => decryptPasswordMock(...args),
 }));
 
+vi.mock('./sub2apiRefreshSingleflight.js', () => ({
+  refreshSub2ApiManagedSessionSingleflight: (...args: unknown[]) => refreshSub2ApiManagedSessionMock(...args),
+}));
+
 describe('checkinService auto relogin', () => {
   beforeEach(() => {
     adapterMock.checkin.mockReset();
@@ -86,6 +91,7 @@ describe('checkinService auto relogin', () => {
     reportTokenExpiredMock.mockReset();
     refreshBalanceMock.mockReset();
     decryptPasswordMock.mockReset();
+    refreshSub2ApiManagedSessionMock.mockReset();
     selectAllMock.mockReset();
     insertValuesMock.mockReset();
     updateSetMock.mockReset();
@@ -407,6 +413,102 @@ describe('checkinService auto relogin', () => {
     expect(firstInsertPayload?.status).toBe('skipped');
     expect(refreshBalanceMock).not.toHaveBeenCalled();
     expect(notifyMock).not.toHaveBeenCalled();
+  });
+
+  it('refreshes managed sub2api session before checkin when the JWT is near expiry', async () => {
+    const nextExtraConfig = JSON.stringify({
+      sub2apiAuth: {
+        refreshToken: 'refresh-token-2',
+        tokenExpiresAt: Date.now() + 60 * 60 * 1000,
+      },
+    });
+    selectAllMock.mockReturnValue([
+      {
+        accounts: {
+          id: 19,
+          username: 'sub2_due',
+          accessToken: 'old-jwt',
+          status: 'active',
+          extraConfig: JSON.stringify({
+            sub2apiAuth: {
+              refreshToken: 'refresh-token-1',
+              tokenExpiresAt: Date.now() + 60_000,
+            },
+          }),
+        },
+        sites: {
+          id: 19,
+          name: 'sub2',
+          url: 'https://sub2.example.com',
+          platform: 'sub2api',
+        },
+      },
+    ]);
+    refreshSub2ApiManagedSessionMock.mockResolvedValue({
+      accessToken: 'fresh-jwt',
+      extraConfig: nextExtraConfig,
+    });
+    adapterMock.checkin.mockResolvedValue({ success: true, message: '签到成功' });
+
+    const { checkinAccount } = await import('./checkinService.js');
+    const result = await checkinAccount(19);
+
+    expect(result.success).toBe(true);
+    expect(refreshSub2ApiManagedSessionMock).toHaveBeenCalledTimes(1);
+    expect(refreshSub2ApiManagedSessionMock).toHaveBeenCalledWith(expect.objectContaining({
+      currentAccessToken: 'old-jwt',
+      currentExtraConfig: expect.stringContaining('refresh-token-1'),
+    }));
+    expect(adapterMock.checkin).toHaveBeenCalledTimes(1);
+    expect(adapterMock.checkin.mock.calls[0][1]).toBe('fresh-jwt');
+  });
+
+  it('retries sub2api checkin once with managed refresh when upstream reports token expiry', async () => {
+    const nextExtraConfig = JSON.stringify({
+      sub2apiAuth: {
+        refreshToken: 'refresh-token-4',
+        tokenExpiresAt: Date.now() + 60 * 60 * 1000,
+      },
+    });
+    selectAllMock.mockReturnValue([
+      {
+        accounts: {
+          id: 20,
+          username: 'sub2_expired',
+          accessToken: 'expired-jwt',
+          status: 'active',
+          extraConfig: JSON.stringify({
+            sub2apiAuth: {
+              refreshToken: 'refresh-token-3',
+              tokenExpiresAt: Date.now() + 10 * 60 * 1000,
+            },
+          }),
+        },
+        sites: {
+          id: 20,
+          name: 'sub2',
+          url: 'https://sub2.example.com',
+          platform: 'sub2api',
+        },
+      },
+    ]);
+    refreshSub2ApiManagedSessionMock.mockResolvedValue({
+      accessToken: 'fresh-jwt',
+      extraConfig: nextExtraConfig,
+    });
+    adapterMock.checkin
+      .mockResolvedValueOnce({ success: false, message: 'access token expired' })
+      .mockResolvedValueOnce({ success: true, message: '签到成功' });
+
+    const { checkinAccount } = await import('./checkinService.js');
+    const result = await checkinAccount(20);
+
+    expect(result.success).toBe(true);
+    expect(refreshSub2ApiManagedSessionMock).toHaveBeenCalledTimes(1);
+    expect(adapterMock.checkin).toHaveBeenCalledTimes(2);
+    expect(adapterMock.checkin.mock.calls[0][1]).toBe('expired-jwt');
+    expect(adapterMock.checkin.mock.calls[1][1]).toBe('fresh-jwt');
+    expect(reportTokenExpiredMock).not.toHaveBeenCalled();
   });
 
   it('treats turnstile-required responses as skipped', async () => {

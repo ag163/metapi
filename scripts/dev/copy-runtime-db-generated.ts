@@ -1,4 +1,4 @@
-import { cpSync, existsSync, mkdirSync, rmSync, statSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { basename, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -12,6 +12,30 @@ function shouldCopySharedArtifact(sourcePath: string): boolean {
   return filename.endsWith('.js') || filename.endsWith('.d.ts');
 }
 
+function copyDirectoryRecursive(
+  sourcePath: string,
+  targetPath: string,
+  filter: (sourcePath: string) => boolean = () => true,
+): void {
+  if (!filter(sourcePath)) return;
+
+  const stat = statSync(sourcePath);
+  if (!stat.isDirectory()) {
+    mkdirSync(dirname(targetPath), { recursive: true });
+    copyFileSync(sourcePath, targetPath);
+    return;
+  }
+
+  mkdirSync(targetPath, { recursive: true });
+  for (const entry of readdirSync(sourcePath)) {
+    copyDirectoryRecursive(
+      resolve(sourcePath, entry),
+      resolve(targetPath, entry),
+      filter,
+    );
+  }
+}
+
 export function copyRuntimeDbGeneratedAssets(repoRoot: string = resolveRepoRoot()): void {
   const sourceDir = resolve(repoRoot, 'src/server/db/generated');
   const targetDir = resolve(repoRoot, 'dist/server/db/generated');
@@ -23,16 +47,12 @@ export function copyRuntimeDbGeneratedAssets(repoRoot: string = resolveRepoRoot(
   }
 
   mkdirSync(dirname(targetDir), { recursive: true });
-  cpSync(sourceDir, targetDir, { recursive: true, force: true });
+  copyDirectoryRecursive(sourceDir, targetDir);
 
   if (existsSync(sharedSourceDir)) {
     rmSync(sharedTargetDir, { recursive: true, force: true });
     mkdirSync(dirname(sharedTargetDir), { recursive: true });
-    cpSync(sharedSourceDir, sharedTargetDir, {
-      recursive: true,
-      force: true,
-      filter: (sourcePath) => shouldCopySharedArtifact(sourcePath),
-    });
+    copyDirectoryRecursive(sharedSourceDir, sharedTargetDir, shouldCopySharedArtifact);
   }
 }
 
