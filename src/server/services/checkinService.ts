@@ -1,6 +1,6 @@
 import { db, schema } from '../db/index.js';
 import { getAdapter } from './platforms/index.js';
-import { eq, and } from 'drizzle-orm';
+import { eq, and, gte, inArray, lt } from 'drizzle-orm';
 import { sendNotification } from './notifyService.js';
 import { isCloudflareChallenge, isTokenExpiredError } from './alertRules.js';
 import { reportTokenExpired } from './alertService.js';
@@ -17,7 +17,7 @@ import {
 } from './accountExtraConfig.js';
 import { decryptAccountPassword } from './accountCredentialService.js';
 import { setAccountRuntimeHealth } from './accountHealthService.js';
-import { formatUtcSqlDateTime } from './localTimeService.js';
+import { formatUtcSqlDateTime, getLocalDayRangeUtc } from './localTimeService.js';
 import { withAccountProxyOverride } from './siteProxy.js';
 import {
   isManagedSub2ApiTokenDue,
@@ -76,6 +76,53 @@ async function waitForPlannedDelay(startedAtMs: number, plannedDelayMs: number) 
 
 function isSiteDisabled(status?: string | null): boolean {
   return (status || 'active') === 'disabled';
+}
+
+async function loadSuccessfulCheckinAccountIdsForLocalDay(accountIds: number[], now = new Date()) {
+  const uniqueAccountIds = Array.from(new Set(accountIds.filter((id) => Number.isInteger(id))));
+  if (uniqueAccountIds.length === 0) {
+    return {
+      accountIds: new Set<number>(),
+      localDay: getLocalDayRangeUtc(now).localDay,
+    };
+  }
+
+  const localDayRange = getLocalDayRangeUtc(now);
+  const rows = await db
+    .select({ accountId: schema.checkinLogs.accountId })
+    .from(schema.checkinLogs)
+    .where(
+      and(
+        inArray(schema.checkinLogs.accountId, uniqueAccountIds),
+        eq(schema.checkinLogs.status, 'success'),
+        gte(schema.checkinLogs.createdAt, localDayRange.startUtc),
+        lt(schema.checkinLogs.createdAt, localDayRange.endUtc),
+      ),
+    )
+    .all();
+
+  return {
+    accountIds: new Set(rows.map((row: any) => Number(row.accountId)).filter(Number.isInteger)),
+    localDay: localDayRange.localDay,
+  };
+}
+
+async function recordScheduledAlreadyCheckedSkip(accountId: number, localDay: string) {
+  const message = `今日已成功签到（${localDay}），定时任务跳过`;
+  await db.insert(schema.checkinLogs).values({
+    accountId,
+    status: 'skipped',
+    message,
+    createdAt: formatUtcSqlDateTime(new Date()),
+  }).run();
+
+  return {
+    success: true,
+    status: 'skipped' as const,
+    skipped: true,
+    reason: 'already_checked_in_today',
+    message,
+  };
 }
 
 function isAlreadyCheckedInMessage(message?: string | null): boolean {
@@ -441,10 +488,13 @@ export async function checkinAll(options?: {
   const scopedAccountIds = options?.accountIds ? new Set(options.accountIds) : null;
   const results: Array<{ accountId: number; username: string | null; site: string; result: any }> = [];
   const useScheduledCronStagger = options?.staggerMode === 'scheduled-cron';
+  const scopedRows = rows.filter((row) => !scopedAccountIds || scopedAccountIds.has(row.accounts.id));
+  const scheduledCronAlreadyChecked = options?.scheduleMode === 'cron'
+    ? await loadSuccessfulCheckinAccountIdsForLocalDay(scopedRows.map((row) => row.accounts.id))
+    : null;
 
   const grouped = new Map<number, typeof rows>();
-  for (const row of rows) {
-    if (scopedAccountIds && !scopedAccountIds.has(row.accounts.id)) continue;
+  for (const row of scopedRows) {
     const siteId = row.sites.id;
     if (!grouped.has(siteId)) grouped.set(siteId, []);
     grouped.get(siteId)!.push(row);
@@ -466,10 +516,15 @@ export async function checkinAll(options?: {
           delayByAccountId.get(row.accounts.id) ?? 0,
         );
       }
-      const r = await checkinAccount(row.accounts.id, {
-        skipEvent: true,
-        scheduleMode: options?.scheduleMode,
-      });
+      const r = scheduledCronAlreadyChecked?.accountIds.has(row.accounts.id)
+        ? await recordScheduledAlreadyCheckedSkip(
+          row.accounts.id,
+          scheduledCronAlreadyChecked.localDay,
+        )
+        : await checkinAccount(row.accounts.id, {
+          skipEvent: true,
+          scheduleMode: options?.scheduleMode,
+        });
       results.push({
         accountId: row.accounts.id,
         username: row.accounts.username,

@@ -1,5 +1,4 @@
 import { FastifyInstance } from 'fastify';
-import { config } from '../../config.js';
 import { db, schema } from '../../db/index.js';
 import { upsertSetting } from '../../db/upsertSetting.js';
 import { eq, desc } from 'drizzle-orm';
@@ -7,6 +6,31 @@ import { checkinAccount, checkinAll } from '../../services/checkinService.js';
 import { updateCheckinSchedule } from '../../services/checkinScheduler.js';
 import { startBackgroundTask, summarizeCheckinResults } from '../../services/backgroundTaskService.js';
 import { classifyFailureReason } from '../../services/failureReasonService.js';
+
+type ManualCheckinRequestBody = {
+  source?: string;
+  manual?: boolean;
+  confirm?: boolean;
+} | undefined;
+
+function hasExplicitManualCheckinConfirmation(request: { body?: ManualCheckinRequestBody; headers: Record<string, unknown> }) {
+  const body = request.body;
+  const header = request.headers['x-metapi-manual-action'];
+  return (
+    body?.source === 'manual'
+    || body?.manual === true
+    || body?.confirm === true
+    || header === 'checkin'
+  );
+}
+
+function sendManualCheckinConfirmationRequired(reply: any) {
+  return reply.code(400).send({
+    success: false,
+    error: 'manual check-in requires explicit confirmation',
+    message: '手动签到需要明确确认；自动签到只会按设置里的定时任务执行',
+  });
+}
 
 function buildCheckinAccountLabel(item: any): string {
   const username = item?.username || (item?.accountId ? `#${item.accountId}` : 'unknown');
@@ -60,7 +84,11 @@ function buildCheckinTaskDetailMessage(results: any[]): string {
 
 export async function checkinRoutes(app: FastifyInstance) {
   // Trigger check-in for all accounts
-  app.post('/api/checkin/trigger', async (_, reply) => {
+  app.post<{ Body: ManualCheckinRequestBody }>('/api/checkin/trigger', async (request, reply) => {
+    if (!hasExplicitManualCheckinConfirmation(request)) {
+      return sendManualCheckinConfirmationRequired(reply);
+    }
+
     const { task, reused } = startBackgroundTask(
       {
         type: 'checkin',
@@ -85,7 +113,7 @@ export async function checkinRoutes(app: FastifyInstance) {
         failureMessage: (currentTask) => `全部账号签到任务失败：${currentTask.error || 'unknown error'}`,
       },
       async () => {
-        const results = await checkinAll({ scheduleMode: config.checkinScheduleMode });
+        const results = await checkinAll();
         return {
           summary: summarizeCheckinResults(results),
           total: results.length,
@@ -107,9 +135,13 @@ export async function checkinRoutes(app: FastifyInstance) {
   });
 
   // Trigger check-in for a specific account
-  app.post<{ Params: { id: string } }>('/api/checkin/trigger/:id', async (request) => {
+  app.post<{ Params: { id: string }; Body: ManualCheckinRequestBody }>('/api/checkin/trigger/:id', async (request, reply) => {
+    if (!hasExplicitManualCheckinConfirmation(request)) {
+      return sendManualCheckinConfirmationRequired(reply);
+    }
+
     const id = parseInt(request.params.id, 10);
-    const result = await checkinAccount(id, { scheduleMode: config.checkinScheduleMode });
+    const result = await checkinAccount(id);
     return result;
   });
 

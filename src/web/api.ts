@@ -906,9 +906,18 @@ export const api = {
     }),
 
   // Check-in
-  triggerCheckinAll: () => request("/api/checkin/trigger", { method: "POST" }),
+  triggerCheckinAll: () =>
+    request("/api/checkin/trigger", {
+      method: "POST",
+      headers: { "X-Metapi-Manual-Action": "checkin" },
+      body: JSON.stringify({ source: "manual" }),
+    }),
   triggerCheckin: (id: number) =>
-    request(`/api/checkin/trigger/${id}`, { method: "POST" }),
+    request(`/api/checkin/trigger/${id}`, {
+      method: "POST",
+      headers: { "X-Metapi-Manual-Action": "checkin" },
+      body: JSON.stringify({ source: "manual" }),
+    }),
   getCheckinLogs: (params?: string) =>
     request(`/api/checkin/logs${params ? "?" + params : ""}`),
   updateCheckinSchedule: (cron: string) =>

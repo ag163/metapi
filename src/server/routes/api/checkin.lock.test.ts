@@ -69,7 +69,8 @@ describe('POST /api/checkin/trigger background task dedupe', () => {
     const app = Fastify();
     await app.register(checkinRoutes);
 
-    const firstResponse = await app.inject({ method: 'POST', url: '/api/checkin/trigger' });
+    const manualPayload = { source: 'manual' };
+    const firstResponse = await app.inject({ method: 'POST', url: '/api/checkin/trigger', payload: manualPayload });
     expect(firstResponse.statusCode).toBe(202);
     const firstBody = firstResponse.json() as { success: boolean; queued: boolean; jobId: string };
     expect(firstBody.success).toBe(true);
@@ -77,7 +78,7 @@ describe('POST /api/checkin/trigger background task dedupe', () => {
     expect(typeof firstBody.jobId).toBe('string');
     expect(firstBody.jobId.length).toBeGreaterThan(10);
 
-    const secondResponse = await app.inject({ method: 'POST', url: '/api/checkin/trigger' });
+    const secondResponse = await app.inject({ method: 'POST', url: '/api/checkin/trigger', payload: manualPayload });
     expect(secondResponse.statusCode).toBe(202);
     const secondBody = secondResponse.json() as { reused: boolean; jobId: string };
     expect(secondBody.reused).toBe(true);
@@ -86,6 +87,38 @@ describe('POST /api/checkin/trigger background task dedupe', () => {
 
     resolveFirst([]);
     await new Promise((resolve) => setTimeout(resolve, 20));
+    await app.close();
+  });
+
+  it('rejects unconfirmed manual checkin-all requests so stale clients cannot trigger checkin', async () => {
+    const { checkinRoutes } = await import('./checkin.js');
+    const app = Fastify();
+    await app.register(checkinRoutes);
+
+    const response = await app.inject({ method: 'POST', url: '/api/checkin/trigger' });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({
+      success: false,
+      error: 'manual check-in requires explicit confirmation',
+    });
+    expect(checkinAllMock).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it('rejects unconfirmed single-account manual checkin requests', async () => {
+    const { checkinRoutes } = await import('./checkin.js');
+    const app = Fastify();
+    await app.register(checkinRoutes);
+
+    const response = await app.inject({ method: 'POST', url: '/api/checkin/trigger/1' });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({
+      success: false,
+      error: 'manual check-in requires explicit confirmation',
+    });
+    expect(checkinAccountMock).not.toHaveBeenCalled();
     await app.close();
   });
 
